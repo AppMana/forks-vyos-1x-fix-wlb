@@ -1,0 +1,48 @@
+# Copyright VyOS maintainers and contributors <maintainers@vyos.io>
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this library.  If not, see <http://www.gnu.org/licenses/>.
+
+# Move 'vpp nat44' and 'vpp settings nat44' to 'vpp nat nat44'.
+# Drop settings for nat workers (T8254)
+
+
+from vyos.configtree import ConfigTree
+
+
+base_path = ['vpp', 'nat44']
+new_base_path = ['vpp', 'nat', 'nat44']
+
+settings_path = ['vpp', 'settings', 'nat44']
+
+
+def migrate(config: ConfigTree) -> None:
+    if not config.exists(base_path):
+        # Nothing to do
+        return
+
+    if not config.exists(['vpp', 'nat']):
+        config.set(['vpp', 'nat'])
+
+    # copy "vpp nat44" to "vpp nat nat44"
+    config.copy(base_path, new_base_path)
+    config.delete(base_path)
+
+    # move 'vpp settings nat44' to 'vpp nat nat44'
+    if config.exists(settings_path):
+        if config.exists(settings_path + ['session-limit']):
+            session_limit = config.return_value(settings_path + ['session-limit'])
+            config.set(new_base_path + ['session-limit'], value=session_limit)
+        if config.exists(settings_path + ['timeout']):
+            config.copy(settings_path + ['timeout'], new_base_path + ['timeout'])
+        config.delete(settings_path)
