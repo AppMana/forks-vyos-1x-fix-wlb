@@ -15,18 +15,20 @@
 
 # Move 'vpp nat44' and 'vpp settings nat44' to 'vpp nat nat44'.
 # Drop settings for nat workers (T8254)
-
+#
+# Rename `vpp settings logging default-log-level` to
+# `vpp settings logging default-level` (T8255)
+#
 
 from vyos.configtree import ConfigTree
 
 
-base_path = ['vpp', 'nat44']
-new_base_path = ['vpp', 'nat', 'nat44']
+def _migrate_vpp_nat44(config: ConfigTree) -> None:
+    base_path = ['vpp', 'nat44']
+    new_base_path = ['vpp', 'nat', 'nat44']
 
-settings_path = ['vpp', 'settings', 'nat44']
+    settings_path = ['vpp', 'settings', 'nat44']
 
-
-def migrate(config: ConfigTree) -> None:
     if not config.exists(base_path):
         # Nothing to do
         return
@@ -46,3 +48,14 @@ def migrate(config: ConfigTree) -> None:
         if config.exists(settings_path + ['timeout']):
             config.copy(settings_path + ['timeout'], new_base_path + ['timeout'])
         config.delete(settings_path)
+
+
+def _migrate_vpp_log(config: ConfigTree) -> None:
+    base = ['vpp', 'settings', 'logging']
+    if config.exists(base + ['default-log-level']):
+        config.rename(base + ['default-log-level'], 'default-level')
+
+
+def migrate(config: ConfigTree) -> None:
+    _migrate_vpp_nat44(config)
+    _migrate_vpp_log(config)
