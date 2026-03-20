@@ -178,10 +178,8 @@ def verify(config):
         mac = config['mac']
         try:
             assert_mac(mac, test_all_zero=False)
-        except ValueError:
-            raise ConfigError(
-                f'Cannot use {mac}: it is a multicast MAC address. Please provide a unicast MAC address.'
-            )
+        except ValueError as e:
+            raise ConfigError(f'Cannot use {mac}: {e}')
 
     for vif_remove in config.get('vif_remove', []):
         vif_iface = f'{ifname}.{vif_remove}'
