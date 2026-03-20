@@ -480,7 +480,7 @@ class Config(object):
         else:
             return(value)
 
-    def return_values(self, path, default=[]):
+    def return_values(self, path, default=None):
         """
         Retrieve all values of a multi-value leaf node in the running or proposed config
 
@@ -495,6 +495,8 @@ class Config(object):
             This function cannot be used outside a configuration session.
             In operational mode scripts, use ``return_effective_values``.
         """
+        if default is None:
+            default = []
         if self._session_config:
             try:
                 values = self._session_config.return_values(self._make_path(path))
@@ -508,7 +510,7 @@ class Config(object):
         else:
             return(values)
 
-    def list_nodes(self, path, default=[]):
+    def list_nodes(self, path, default=None):
         """
         Retrieve names of all children of a tag node in the running or proposed config
 
@@ -519,6 +521,8 @@ class Config(object):
             string list: child node names
 
         """
+        if default is None:
+            default = []
         if self._session_config:
             try:
                 nodes = self._session_config.list_nodes(self._make_path(path))
@@ -596,7 +600,7 @@ class Config(object):
         else:
             return(value)
 
-    def return_effective_values(self, path, default=[]):
+    def return_effective_values(self, path, default=None):
         """
         Retrieve all values of a multi-value node in a running (effective) config
 
@@ -606,6 +610,8 @@ class Config(object):
         Returns:
             str list: A list of values
         """
+        if default is None:
+            default = []
         if self._running_config:
             try:
                 values = self._running_config.return_values(self._make_path(path))
@@ -619,7 +625,7 @@ class Config(object):
         else:
             return(values)
 
-    def list_effective_nodes(self, path, default=[]):
+    def list_effective_nodes(self, path, default=None):
         """
         Retrieve names of all children of a tag node in the running config
 
@@ -629,6 +635,8 @@ class Config(object):
         Returns:
             str list: child node names
         """
+        if default is None:
+            default = []
         if self._running_config:
             try:
                 nodes = self._running_config.list_nodes(self._make_path(path))
