@@ -121,7 +121,7 @@ def config_dict_mangle_acme(name, cli_dict):
             key_base64 = "".join(encode_private_key(tmp).strip().split("\n")[1:-1])
             # install ACME based PEM keys into "regular" CLI config keys
             cli_dict.update({'certificate' : cert_base64, 'private' : {'key' : key_base64}})
-    except:
+    except Exception:
         Warning(f'Unable to load ACME certificates for "{name}"!')
 
     return cli_dict

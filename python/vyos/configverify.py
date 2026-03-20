@@ -46,7 +46,7 @@ def verify_mtu(config):
         try:
             min_mtu = tmp.get_min_mtu()
             max_mtu = tmp.get_max_mtu()
-        except: # Fallback to defaults
+        except Exception: # Fallback to defaults
             min_mtu = 68
             max_mtu = 9000
 
@@ -433,7 +433,7 @@ def verify_diffie_hellman_length(file, min_keysize):
 
     try:
         keysize = str(min_keysize)
-    except:
+    except (TypeError, ValueError):
         return False
 
     if os.path.exists(file):
