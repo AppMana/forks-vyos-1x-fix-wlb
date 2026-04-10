@@ -204,8 +204,11 @@ def cleanup(lb):
         index = 1
         for ifname, health_conf in lb['interface_health'].items():
             table_num = lb['mark_offset'] + index
+            suppress_prio = lb['mark_offset'] + index
+            table_prio = suppress_prio + 100
             run(f'ip route del table {table_num} default')
-            run(f'ip rule del fwmark {hex(table_num)} table {table_num}')
+            run(f'ip rule del priority {suppress_prio}')
+            run(f'ip rule del priority {table_prio}')
             index += 1
 
     run(f'nft delete table ip vyos_wanloadbalance')
@@ -263,7 +266,14 @@ if __name__ == '__main__':
             else:
                 run(f'ip route replace table {table_num} default dev {ifname} via {health_conf["nexthop"]}')
 
-            run(f'ip rule add fwmark {hex(table_num)} table {table_num}')
+            # First: check main table for specific routes (suppress default route)
+            # This ensures internal traffic (BGP, connected, static) is routed
+            # correctly even when fwmarked by WLB
+            suppress_prio = lb['mark_offset'] + index
+            table_prio = suppress_prio + 100
+            run(f'ip rule add fwmark {hex(table_num)} table main suppress_prefixlength 0 priority {suppress_prio}')
+            # Then: fall through to per-interface table for default route traffic
+            run(f'ip rule add fwmark {hex(table_num)} table {table_num} priority {table_prio}')
 
             index += 1
 
@@ -272,8 +282,9 @@ if __name__ == '__main__':
         run('ip route flush cache')
 
         if 'flush_connections' in lb:
-            run('conntrack --delete')
-            run('conntrack -F expect')
+            for _ifname in lb['interface_health']:
+                run(f'conntrack -D -o {_ifname}')
+                run(f'conntrack -D -r {_ifname}')
 
         with open(wlb_status_file, 'w') as f:
             f.write(json.dumps(lb['health_state']))
