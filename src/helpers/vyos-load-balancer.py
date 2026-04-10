@@ -278,8 +278,9 @@ if __name__ == '__main__':
         run('ip route flush cache')
 
         if 'flush_connections' in lb:
-            run('conntrack --delete')
-            run('conntrack -F expect')
+            for _ifname in lb['interface_health']:
+                run(f'conntrack -D -o {_ifname}')
+                run(f'conntrack -D -r {_ifname}')
 
         with open(wlb_status_file, 'w') as f:
             f.write(json.dumps(lb['health_state']))
