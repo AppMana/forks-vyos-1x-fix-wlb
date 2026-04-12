@@ -1,0 +1,71 @@
+name: Build VyOS ISO
+
+on:
+  push:
+    branches:
+      - T8480-T8481
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  BUILD_BY: autobuild@appmana.com
+  DEBIAN_MIRROR: http://deb.debian.org/debian/
+  DEBIAN_SECURITY_MIRROR: http://deb.debian.org/debian-security
+
+jobs:
+  build_iso:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    container:
+      image: vyos/vyos-build:current
+      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged
+    steps:
+      - name: Clone vyos-build
+        uses: actions/checkout@v4
+        with:
+          repository: vyos/vyos-build
+          ref: current
+
+      - name: Clone vyos-1x
+        uses: actions/checkout@v4
+        with:
+          path: packages/vyos-1x
+          fetch-depth: 0
+          submodules: true
+
+      - name: Build vyos-1x package
+        run: |
+          cd packages/vyos-1x
+          dpkg-buildpackage -uc -us -tc -b
+
+      - name: Generate version string
+        id: version
+        run: |
+          echo "build_version=$(date -u +'%Y.%m.%d-%H%M')-wlb-fix" >> $GITHUB_OUTPUT
+
+      - name: Build ISO
+        run: |
+          sudo --preserve-env ./build-vyos-image \
+            --architecture amd64 \
+            --build-by $BUILD_BY \
+            --build-type release \
+            --debian-mirror $DEBIAN_MIRROR \
+            --debian-security-mirror $DEBIAN_SECURITY_MIRROR \
+            --version ${{ steps.version.outputs.build_version }} \
+            --vyos-mirror https://packages.vyos.net/repositories/current/ \
+            generic
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: vyos-${{ steps.version.outputs.build_version }}
+          name: VyOS ${{ steps.version.outputs.build_version }}
+          body: |
+            VyOS rolling ISO with WLB fixes:
+            - T8480: add suppress_prefixlength ip rules for internal routing
+            - T8481: scope flush-connections to WLB interfaces only
+          files: |
+            build/live-image-amd64.hybrid.iso
