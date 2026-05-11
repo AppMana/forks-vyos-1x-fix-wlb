@@ -144,7 +144,10 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
                     output.append(f'{proto} {prefix}port {operator} @P_{group_name}')
 
     if 'source_based_routing' not in rule_conf and not restore_mark:
-        output.append('ct state new')
+        if ip_name == 'ip6':
+            output.append('ct state { new, untracked }')
+        else:
+            output.append('ct state new')
 
     if limit and 'limit' in rule_conf and 'rate' in rule_conf['limit']:
         output.append(f'limit rate {rule_conf["limit"]["rate"]}/{rule_conf["limit"]["period"]}')
