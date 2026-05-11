@@ -147,6 +147,45 @@ def dynamic_nexthop_update(lb, ifname):
 
     return False
 
+def get_ipv6_default_route(ifname: str) -> dict | None:
+    rc, out = rc_cmd(f'ip -j -6 route show default dev {ifname}')
+    if rc != 0:
+        return None
+
+    try:
+        routes = json.loads(out)
+    except ValueError:
+        return None
+
+    if not routes:
+        return None
+
+    route = routes[0]
+    route_conf = {'ifname': ifname}
+    if 'gateway' in route:
+        route_conf['gateway'] = route['gateway']
+
+    return route_conf
+
+def install_ipv6_default_route(table_num: int, route_conf: dict) -> None:
+    if 'gateway' in route_conf:
+        run(f'ip -6 route replace table {table_num} default via {route_conf["gateway"]} dev {route_conf["ifname"]}')
+    else:
+        run(f'ip -6 route replace table {table_num} default dev {route_conf["ifname"]}')
+
+def ipv6_default_route_update(lb, ifname):
+    table_num = dict_search_args(lb, 'health_state', ifname, 'table_number')
+    if not table_num:
+        return
+
+    route_conf = get_ipv6_default_route(ifname)
+    if not route_conf:
+        return
+
+    if lb['health_state'][ifname].get('ipv6_default_route') != route_conf:
+        lb['health_state'][ifname]['ipv6_default_route'] = route_conf
+        install_ipv6_default_route(table_num, route_conf)
+
 def restore_default_route(lb: dict, ifname: str) -> None:
     """
     Restores a missing default route for a WAN interface in its policy routing table.
@@ -168,9 +207,7 @@ def restore_default_route(lb: dict, ifname: str) -> None:
     rc, out = rc_cmd(f'ip -j route show default table {table_num}')
     if rc == 0:
         rt_table = json.loads(out)
-        if len(rt_table) > 0:
-            return
-        else:
+        if len(rt_table) == 0:
             if 'dhcp_nexthop' in lb['health_state'][ifname]:
                 nexthop_addr = get_dynamic_nexthop(ifname)
             else:
@@ -178,8 +215,16 @@ def restore_default_route(lb: dict, ifname: str) -> None:
 
             if nexthop_addr:
                 run(f'ip route replace table {table_num} default dev {ifname} via {nexthop_addr}')
-    else:
+
+    ipv6_route_conf = dict_search_args(lb, 'health_state', ifname, 'ipv6_default_route')
+    if not ipv6_route_conf:
         return
+
+    rc, out = rc_cmd(f'ip -j -6 route show default table {table_num}')
+    if rc == 0:
+        rt_table = json.loads(out)
+        if len(rt_table) == 0:
+            install_ipv6_default_route(table_num, ipv6_route_conf)
 
 def nftables_update(lb):
     # Atomically reload nftables table from template
@@ -204,11 +249,18 @@ def cleanup(lb):
         index = 1
         for ifname, health_conf in lb['interface_health'].items():
             table_num = lb['mark_offset'] + index
+            suppress_prio = lb['mark_offset'] + index
+            table_prio = suppress_prio + 100
             run(f'ip route del table {table_num} default')
-            run(f'ip rule del fwmark {hex(table_num)} table {table_num}')
+            run(f'ip -6 route del table {table_num} default')
+            run(f'ip rule del priority {suppress_prio}')
+            run(f'ip rule del priority {table_prio}')
+            run(f'ip -6 rule del priority {suppress_prio}')
+            run(f'ip -6 rule del priority {table_prio}')
             index += 1
 
     run(f'nft delete table ip vyos_wanloadbalance')
+    run(f'nft delete table ip6 vyos_wanloadbalance')
 
 def get_config():
     conf = Config()
@@ -263,7 +315,14 @@ if __name__ == '__main__':
             else:
                 run(f'ip route replace table {table_num} default dev {ifname} via {health_conf["nexthop"]}')
 
-            run(f'ip rule add fwmark {hex(table_num)} table {table_num}')
+            ipv6_default_route_update(lb, ifname)
+
+            suppress_prio = lb['mark_offset'] + index
+            table_prio = suppress_prio + 100
+            run(f'ip rule add fwmark {hex(table_num)} table main suppress_prefixlength 0 priority {suppress_prio}')
+            run(f'ip rule add fwmark {hex(table_num)} table {table_num} priority {table_prio}')
+            run(f'ip -6 rule add fwmark {hex(table_num)} table main suppress_prefixlength 0 priority {suppress_prio}')
+            run(f'ip -6 rule add fwmark {hex(table_num)} table {table_num} priority {table_prio}')
 
             index += 1
 
@@ -351,6 +410,7 @@ if __name__ == '__main__':
                     if dynamic_nexthop_update(lb, ifname):
                         ip_change = True
 
+                    ipv6_default_route_update(lb, ifname)
                     restore_default_route(lb, ifname)
 
             if any(state['state_changed'] for ifname, state in lb['health_state'].items()):
