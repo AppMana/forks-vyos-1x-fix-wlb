@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import ipaddress
 import os
 
 from vyos.defaults import directories
@@ -21,7 +22,18 @@ from vyos.utils.process import run
 
 dhclient_lease = 'dhclient_{0}.lease'
 
-def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False):
+def _address_matches_family(address, ip_name):
+    if address[:1] == '!':
+        address = address[1:]
+
+    try:
+        network = ipaddress.ip_network(address, strict=False)
+    except ValueError:
+        return False
+
+    return (ip_name == 'ip' and network.version == 4) or (ip_name == 'ip6' and network.version == 6)
+
+def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False, ip_name='ip'):
     output = []
 
     if 'inbound_interface' in rule_conf:
@@ -54,10 +66,12 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
         if 'address' in direction_conf:
             operator = ''
             address = direction_conf['address']
+            if not _address_matches_family(address, ip_name):
+                return ''
             if address[:1] == '!':
                 operator = '!='
                 address = address[1:]
-            output.append(f'ip {prefix}addr {operator} {address}')
+            output.append(f'{ip_name} {prefix}addr {operator} {address}')
 
         if 'port' in direction_conf:
             operator = ''
@@ -70,20 +84,43 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
         if 'group' in direction_conf:
                 group = direction_conf['group']
                 if 'address_group' in group:
+                    if ip_name != 'ip':
+                        return ''
                     group_name = group['address_group']
                     operator = ''
                     exclude = group_name[0] == "!"
                     if exclude:
                         operator = '!='
                         group_name = group_name[1:]
-                    output.append(f'ip {prefix}addr {operator} @A_{group_name}')
+                    output.append(f'{ip_name} {prefix}addr {operator} @A_{group_name}')
+                if 'ipv6_address_group' in group:
+                    if ip_name != 'ip6':
+                        return ''
+                    group_name = group['ipv6_address_group']
+                    operator = ''
+                    exclude = group_name[0] == "!"
+                    if exclude:
+                        operator = '!='
+                        group_name = group_name[1:]
+                    output.append(f'{ip_name} {prefix}addr {operator} @A6_{group_name}')
                 if 'network_group' in group:
+                    if ip_name != 'ip':
+                        return ''
                     group_name = group['network_group']
                     operator = ''
                     if group_name[0] == "!":
                         operator = '!='
                         group_name = group_name[1:]
-                    output.append(f'ip {prefix}addr {operator} @N_{group_name}')
+                    output.append(f'{ip_name} {prefix}addr {operator} @N_{group_name}')
+                if 'ipv6_network_group' in group:
+                    if ip_name != 'ip6':
+                        return ''
+                    group_name = group['ipv6_network_group']
+                    operator = ''
+                    if group_name[0] == "!":
+                        operator = '!='
+                        group_name = group_name[1:]
+                    output.append(f'{ip_name} {prefix}addr {operator} @N6_{group_name}')
                 # Generate firewall group domain-group
                 if 'domain_group' in group:
                     group_name = group['domain_group']
@@ -91,7 +128,7 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
                     if group_name[0] == '!':
                         operator = '!='
                         group_name = group_name[1:]
-                    output.append(f'ip {prefix}addr {operator} @D_{group_name}')
+                    output.append(f'{ip_name} {prefix}addr {operator} @D_{group_name}')
                 if 'port_group' in group:
                     proto = rule_conf['protocol']
                     group_name = group['port_group']

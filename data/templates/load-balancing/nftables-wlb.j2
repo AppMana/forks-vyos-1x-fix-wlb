@@ -4,6 +4,7 @@
 
 {% if first_install is not vyos_defined %}
 delete table ip vyos_wanloadbalance
+delete table ip6 vyos_wanloadbalance
 {% endif %}
 table ip vyos_wanloadbalance {
     chain wlb_nat_postrouting {
@@ -65,4 +66,56 @@ table ip vyos_wanloadbalance {
 {% endfor %}
 
 {{ group_tmpl.groups(firewall_group, False, True) }}
+}
+
+table ip6 vyos_wanloadbalance {
+    chain wlb_mangle_prerouting {
+        type filter hook prerouting priority mangle; policy accept;
+{% for ifname, health_conf in interface_health.items() %}
+{%     set state = health_state[ifname] %}
+{%     if sticky_connections is vyos_defined %}
+        iifname "{{ ifname }}" ct state new ct mark set {{ state.mark }}
+{%     endif %}
+{% endfor %}
+{% if rule is vyos_defined %}
+{%     for rule_id, rule_conf in rule.items() %}
+{%         if rule_conf.exclude is vyos_defined %}
+        {{ rule_conf | wlb_nft_rule(rule_id, exclude=True, action='return', ip_name='ip6') }}
+{%         else %}
+{%             set limit = rule_conf.limit is vyos_defined %}
+        {{ rule_conf | wlb_nft_rule(rule_id, limit=limit, weight=True, health_state=health_state, ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, restore_mark=True, ip_name='ip6') }}
+{%         endif %}
+{%     endfor %}
+{% endif %}
+    }
+
+    chain wlb_mangle_output {
+        type filter hook output priority -150; policy accept;
+{% if enable_local_traffic is vyos_defined %}
+        meta mark != 0x0 counter return
+        meta l4proto ipv6-icmp counter return
+        ip6 saddr ::1 ip6 daddr ::1 counter return
+{%     if rule is vyos_defined %}
+{%         for rule_id, rule_conf in rule.items() %}
+{%             if rule_conf.exclude is vyos_defined  %}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, exclude=True, action='return', ip_name='ip6') }}
+{%             else %}
+{%                 set limit = rule_conf.limit is vyos_defined %}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, limit=limit, weight=True, health_state=health_state, ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, restore_mark=True, ip_name='ip6') }}
+{%             endif %}
+{%         endfor %}
+{%     endif %}
+{% endif %}
+    }
+
+{% for ifname, health_conf in interface_health.items() %}
+{%     set state = health_state[ifname] %}
+    chain wlb_mangle_isp_{{ ifname }} {
+        meta mark set {{ state.mark }} ct mark set {{ state.mark }} counter accept
+    }
+{% endfor %}
+
+{{ group_tmpl.groups(firewall_group, True, True) }}
 }
