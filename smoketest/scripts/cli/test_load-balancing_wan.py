@@ -97,6 +97,8 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         call(f'sudo ip address add 203.0.113.10/24 dev {iface1}')
         call(f'sudo ip address add 192.0.2.10/24 dev {iface2}')
         call(f'sudo ip address add 198.51.100.10/24 dev {iface3}')
+        call(f'sudo ip address add 2001:db8:201::10/64 dev {iface1}')
+        call(f'sudo ip address add 2001:db8:202::10/64 dev {iface2}')
         call(f'sudo ip link set dev {iface1} up')
         call(f'sudo ip link set dev {iface2} up')
         call(f'sudo ip link set dev {iface3} up')
@@ -106,9 +108,13 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         cmd_in_netns(ns1, 'ip address add 203.0.113.1/24 dev eth0')
         cmd_in_netns(ns2, 'ip address add 192.0.2.1/24 dev eth0')
         cmd_in_netns(ns3, 'ip address add 198.51.100.1/24 dev eth0')
+        cmd_in_netns(ns1, 'ip address add 2001:db8:201::1/64 dev eth0')
+        cmd_in_netns(ns2, 'ip address add 2001:db8:202::1/64 dev eth0')
         cmd_in_netns(ns1, 'ip link set dev eth0 up')
         cmd_in_netns(ns2, 'ip link set dev eth0 up')
         cmd_in_netns(ns3, 'ip link set dev eth0 up')
+        call(f'sudo ip -6 route add default via 2001:db8:201::1 dev {iface1} metric 201')
+        call(f'sudo ip -6 route add default via 2001:db8:202::1 dev {iface2} metric 202')
 
         # Set load-balancing configuration
         self.cli_set(base_path + ['wan', 'hook', '/bin/true'])
@@ -138,7 +144,21 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         tmp = cmd('sudo ip route show table 202')
         self.assertEqual(tmp, original)
 
+        original = 'default via 2001:db8:201::1 dev eth201 metric 1024 pref medium'
+        tmp = cmd('sudo ip -6 route show table 201')
+        self.assertEqual(tmp, original)
+
+        original = 'default via 2001:db8:202::1 dev eth202 metric 1024 pref medium'
+        tmp = cmd('sudo ip -6 route show table 202')
+        self.assertEqual(tmp, original)
+
         tmp = cmd('sudo ip rule show')
+        self.assertIn('from all fwmark 0xc9 lookup 201', tmp)
+        self.assertIn('from all fwmark 0xca lookup 202', tmp)
+        self.assertNotIn('fwmark 0xc9 lookup main suppress_prefixlength 0', tmp)
+        self.assertNotIn('fwmark 0xca lookup main suppress_prefixlength 0', tmp)
+
+        tmp = cmd('sudo ip -6 rule show')
         self.assertIn('from all fwmark 0xc9 lookup 201', tmp)
         self.assertIn('from all fwmark 0xca lookup 202', tmp)
         self.assertNotIn('fwmark 0xc9 lookup main suppress_prefixlength 0', tmp)
@@ -150,6 +170,12 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         time.sleep(5)
 
         tmp = cmd('sudo ip rule show')
+        self.assertIn('from all fwmark 0xc9 lookup main suppress_prefixlength 0', tmp)
+        self.assertIn('from all fwmark 0xc9 lookup 201', tmp)
+        self.assertIn('from all fwmark 0xca lookup main suppress_prefixlength 0', tmp)
+        self.assertIn('from all fwmark 0xca lookup 202', tmp)
+
+        tmp = cmd('sudo ip -6 rule show')
         self.assertIn('from all fwmark 0xc9 lookup main suppress_prefixlength 0', tmp)
         self.assertIn('from all fwmark 0xc9 lookup 201', tmp)
         self.assertIn('from all fwmark 0xca lookup main suppress_prefixlength 0', tmp)
