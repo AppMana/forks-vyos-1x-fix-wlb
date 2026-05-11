@@ -74,7 +74,7 @@ table ip6 vyos_wanloadbalance {
 {% for ifname, health_conf in interface_health.items() %}
 {%     set state = health_state[ifname] %}
 {%     if sticky_connections is vyos_defined %}
-        iifname "{{ ifname }}" ct state new ct mark set {{ state.mark }}
+        iifname "{{ ifname }}" ct state { new, untracked } ct mark set {{ state.mark }}
 {%     endif %}
 {% endfor %}
 {% if rule is vyos_defined %}
