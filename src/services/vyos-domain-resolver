@@ -59,6 +59,7 @@ ipv4_tables = {
 ipv6_tables = {
     'ip6 vyos_mangle',
     'ip6 vyos_filter',
+    'ip6 vyos_wanloadbalance',
     'ip6 raw'
 }
 
