@@ -187,6 +187,10 @@ def ipv6_default_route_update(lb, ifname):
 
     route_conf = get_ipv6_default_route(ifname)
     if not route_conf:
+        # The interface lost its IPv6 default route: stop steering marked
+        # IPv6 traffic to the old gateway so it falls through to main
+        if lb['health_state'][ifname].pop('ipv6_default_route', None):
+            run(f'ip -6 route del table {table_num} default')
         return
 
     if lb['health_state'][ifname].get('ipv6_default_route') != route_conf:
