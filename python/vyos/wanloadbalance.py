@@ -26,6 +26,9 @@ def _address_matches_family(address, ip_name):
     if address[:1] == '!':
         address = address[1:]
 
+    # A range is <first>-<last>; both ends share the family
+    address = address.split('-', 1)[0]
+
     try:
         network = ipaddress.ip_network(address, strict=False)
     except ValueError:
