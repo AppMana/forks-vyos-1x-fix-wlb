@@ -73,6 +73,19 @@ class TestWanLoadBalanceTemplate(TestCase):
             self.assertIn('jhash ip6 saddr . ip6 daddr mod 2 seed 0x0 vmap', rule)
 
 
+    def test_source_nat_follows_egress_interface(self):
+        # With only-default-route a marked connection is routed by the main
+        # table when it has a more specific route, which can leave through
+        # another WAN than the mark names. It still needs that WAN's address
+        text = render_wlb(self.weighted)
+        nat = text[text.index('chain wlb_nat_postrouting'):text.index('chain wlb_mangle_prerouting')]
+        rules = [l.strip() for l in nat.splitlines() if 'snat to' in l]
+        self.assertEqual(rules, [
+            'ct mark { 0xc9, 0xca } oifname eth0 counter snat to 203.0.113.10',
+            'ct mark { 0xc9, 0xca } oifname eth1 counter snat to 192.0.2.10',
+        ])
+
+
 class TestWanLoadBalanceNftRule(TestCase):
     def test_ipv4_address_range_is_rendered(self):
         # The CLI accepts ipv4range and !ipv4range for source/destination

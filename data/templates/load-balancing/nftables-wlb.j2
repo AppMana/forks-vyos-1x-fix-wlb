@@ -9,10 +9,13 @@ delete table ip6 vyos_wanloadbalance
 table ip vyos_wanloadbalance {
     chain wlb_nat_postrouting {
         type nat hook postrouting priority srcnat - 1; policy accept;
+{# A marked connection can leave through another WAN than its mark names #}
+{# when only-default-route routes it by a more specific main table route #}
+{% set wlb_marks = health_state.values() | map(attribute='mark') | join(', ') %}
 {% for ifname, health_conf in interface_health.items() if health_state[ifname].if_addr %}
 {%     if disable_source_nat is not vyos_defined %}
 {%         set state = health_state[ifname] %}
-        ct mark {{ state.mark }} oifname {{ ifname }} counter snat to {{ state.if_addr }}
+        ct mark { {{ wlb_marks }} } oifname {{ ifname }} counter snat to {{ state.if_addr }}
 {%     endif %}
 {% endfor %}
     }
