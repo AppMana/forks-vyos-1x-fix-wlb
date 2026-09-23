@@ -12,9 +12,65 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import os
+
 from unittest import TestCase
 
+from vyos.template import render_to_string
 from vyos.wanloadbalance import nft_rule
+
+templates = os.path.join(os.path.dirname(__file__), '..', '..', 'data', 'templates')
+
+
+def render_wlb(rule):
+    def health(table):
+        return {'state': True, 'table_number': table, 'mark': hex(table)}
+
+    lb = {
+        'first_install': {},
+        'firewall_group': {},
+        'interface_health': {'eth0': {}, 'eth1': {}},
+        'health_state': {
+            'eth0': dict(health(201), if_addr='203.0.113.10'),
+            'eth1': dict(health(202), if_addr='192.0.2.10'),
+        },
+        'enable_local_traffic': {},
+        'rule': {'10': rule},
+    }
+    return render_to_string('load-balancing/nftables-wlb.j2', lb, location=templates)
+
+
+class TestWanLoadBalanceTemplate(TestCase):
+    weighted = {
+        'inbound_interface': 'eth2',
+        'protocol': 'all',
+        'interface': {'eth0': {'weight': '1'}, 'eth1': {'weight': '1'}},
+    }
+
+    def selection_rules(self, text):
+        return [l.strip() for l in text.splitlines() if 'jump wlb_mangle_isp_' in l]
+
+    def test_tracked_connection_keeps_its_first_choice(self):
+        # conntrack reports "ct state new" for every original direction
+        # packet until the peer replies (UDP before the answer, TCP SYN
+        # retransmits). Such packets must not pick an interface again:
+        # the connection's source NAT is already bound to the first one
+        rules = [r for r in self.selection_rules(render_wlb(self.weighted))
+                 if 'untracked' not in r]
+        self.assertEqual(len(rules), 4)  # ip, ip6 x prerouting, output
+        for rule in rules:
+            self.assertIn('ct state new ct mark != { 0xc9, 0xca }', rule)
+
+    def test_untracked_ipv6_flow_is_not_balanced_per_packet(self):
+        # Without conntrack every packet of a flow is evaluated on its own,
+        # so the interface has to be a function of the flow
+        rules = [r for r in self.selection_rules(render_wlb(self.weighted))
+                 if 'untracked' in r]
+        self.assertEqual(len(rules), 2)  # ip6 prerouting, output
+        for rule in rules:
+            self.assertNotIn('numgen random', rule)
+            self.assertIn('ct state untracked', rule)
+            self.assertIn('jhash ip6 saddr . ip6 daddr mod 2 seed 0x0 vmap', rule)
 
 
 class TestWanLoadBalanceNftRule(TestCase):

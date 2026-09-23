@@ -74,16 +74,18 @@ table ip6 vyos_wanloadbalance {
 {% for ifname, health_conf in interface_health.items() %}
 {%     set state = health_state[ifname] %}
 {%     if sticky_connections is vyos_defined %}
-        iifname "{{ ifname }}" ct state { new, untracked } ct mark set {{ state.mark }}
+        iifname "{{ ifname }}" ct state new ct mark set {{ state.mark }}
 {%     endif %}
 {% endfor %}
 {% if rule is vyos_defined %}
 {%     for rule_id, rule_conf in rule.items() %}
 {%         if rule_conf.exclude is vyos_defined %}
         {{ rule_conf | wlb_nft_rule(rule_id, exclude=True, action='return', ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, exclude=True, action='return', ip_name='ip6', untracked=True) }}
 {%         else %}
 {%             set limit = rule_conf.limit is vyos_defined %}
         {{ rule_conf | wlb_nft_rule(rule_id, limit=limit, weight=True, health_state=health_state, ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, limit=limit, weight=True, health_state=health_state, ip_name='ip6', untracked=True) }}
         {{ rule_conf | wlb_nft_rule(rule_id, restore_mark=True, ip_name='ip6') }}
 {%         endif %}
 {%     endfor %}
@@ -100,9 +102,11 @@ table ip6 vyos_wanloadbalance {
 {%         for rule_id, rule_conf in rule.items() %}
 {%             if rule_conf.exclude is vyos_defined  %}
         {{ rule_conf | wlb_nft_rule(rule_id, local=True, exclude=True, action='return', ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, exclude=True, action='return', ip_name='ip6', untracked=True) }}
 {%             else %}
 {%                 set limit = rule_conf.limit is vyos_defined %}
         {{ rule_conf | wlb_nft_rule(rule_id, local=True, limit=limit, weight=True, health_state=health_state, ip_name='ip6') }}
+        {{ rule_conf | wlb_nft_rule(rule_id, local=True, limit=limit, weight=True, health_state=health_state, ip_name='ip6', untracked=True) }}
         {{ rule_conf | wlb_nft_rule(rule_id, local=True, restore_mark=True, ip_name='ip6') }}
 {%             endif %}
 {%         endfor %}

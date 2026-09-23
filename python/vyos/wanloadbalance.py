@@ -36,7 +36,7 @@ def _address_matches_family(address, ip_name):
 
     return (ip_name == 'ip' and network.version == 4) or (ip_name == 'ip6' and network.version == 6)
 
-def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False, ip_name='ip'):
+def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False, ip_name='ip', untracked=False):
     output = []
 
     if 'inbound_interface' in rule_conf:
@@ -128,10 +128,16 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
                     output.append(f'{proto} {prefix}port {operator} @P_{group_name}')
 
     if 'source_based_routing' not in rule_conf and not restore_mark:
-        if ip_name == 'ip6':
-            output.append('ct state { new, untracked }')
+        if untracked:
+            # No conntrack entry: nothing remembers the choice between packets
+            output.append('ct state untracked')
         else:
             output.append('ct state new')
+            if weight and health_state:
+                # A connection stays "new" until the peer replies; keep the
+                # interface its first packet selected
+                marks = ', '.join(state['mark'] for state in health_state.values())
+                output.append(f'ct mark != {{ {marks} }}')
 
     if limit and 'limit' in rule_conf and 'rate' in rule_conf['limit']:
         output.append(f'limit rate {rule_conf["limit"]["rate"]}/{rule_conf["limit"]["period"]}')
@@ -146,7 +152,12 @@ def nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight
         weights, total_weight = wlb_weight_interfaces(rule_conf, health_state)
         if len(weights) > 1: # Create weight-based verdict map
             vmap_str = ", ".join(f'{weight} : jump wlb_mangle_isp_{ifname}' for ifname, weight in weights)
-            output.append(f'numgen random mod {total_weight} vmap {{ {vmap_str} }}')
+            if untracked:
+                # Same flow, same interface; a fixed seed keeps the mapping
+                # across ruleset reloads
+                output.append(f'jhash {ip_name} saddr . {ip_name} daddr mod {total_weight} seed 0x0 vmap {{ {vmap_str} }}')
+            else:
+                output.append(f'numgen random mod {total_weight} vmap {{ {vmap_str} }}')
         elif len(weights) == 1: # Jump to single ISP
             ifname, _ = weights[0]
             output.append(f'jump wlb_mangle_isp_{ifname}')

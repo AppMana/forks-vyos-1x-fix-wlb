@@ -880,9 +880,9 @@ def conntrack_ct_policy(protocol_conf):
     return ", ".join(output)
 
 @register_filter('wlb_nft_rule')
-def wlb_nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False, ip_name='ip'):
+def wlb_nft_rule(rule_conf, rule_id, local=False, exclude=False, limit=False, weight=None, health_state=None, action=None, restore_mark=False, ip_name='ip', untracked=False):
     from vyos.wanloadbalance import nft_rule as wlb_nft_rule
-    return wlb_nft_rule(rule_conf, rule_id, local, exclude, limit, weight, health_state, action, restore_mark, ip_name)
+    return wlb_nft_rule(rule_conf, rule_id, local, exclude, limit, weight, health_state, action, restore_mark, ip_name, untracked)
 
 @register_filter('range_to_regex')
 def range_to_regex(num_range):

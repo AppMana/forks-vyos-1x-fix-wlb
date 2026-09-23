@@ -213,7 +213,7 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         mangle_prerouting = """table ip vyos_wanloadbalance {
 	chain wlb_mangle_prerouting {
 		type filter hook prerouting priority mangle; policy accept;
-		iifname "veth3" ip saddr 198.51.100.0/24 ct state new counter numgen random mod 11 vmap { 0 : jump wlb_mangle_isp_veth1, 1-10 : jump wlb_mangle_isp_veth2 }
+		iifname "veth3" ip saddr 198.51.100.0/24 ct state new ct mark != { 0x000000c9, 0x000000ca } counter numgen random mod 11 vmap { 0 : jump wlb_mangle_isp_veth1, 1-10 : jump wlb_mangle_isp_veth2 }
 		iifname "veth3" ip saddr 198.51.100.0/24 counter meta mark set ct mark
 	}
 }"""
@@ -287,7 +287,7 @@ class TestLoadBalancingWan(VyOSUnitTestSHIM.TestCase):
         mangle_prerouting_limit = """table ip vyos_wanloadbalance {
 	chain wlb_mangle_prerouting {
 		type filter hook prerouting priority mangle; policy accept;
-		iifname "veth3" ip saddr 198.51.100.0/24 ct state new limit rate 10/second burst 10 packets counter numgen random mod 11 vmap { 0 : jump wlb_mangle_isp_veth1, 1-10 : jump wlb_mangle_isp_veth2 }
+		iifname "veth3" ip saddr 198.51.100.0/24 ct state new ct mark != { 0x000000c9, 0x000000ca } limit rate 10/second burst 10 packets counter numgen random mod 11 vmap { 0 : jump wlb_mangle_isp_veth1, 1-10 : jump wlb_mangle_isp_veth2 }
 		iifname "veth3" ip saddr 198.51.100.0/24 counter meta mark set ct mark
 	}
 }"""
