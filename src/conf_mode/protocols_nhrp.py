@@ -25,9 +25,7 @@ from vyos.utils.process import run
 from vyos.utils.dict import dict_search
 from vyos import ConfigError
 from vyos import airbag
-from vyos.frrender import FRRender
 from vyos.frrender import get_frrender_dict
-from vyos.utils.process import is_systemd_service_running
 
 airbag.enable()
 
@@ -100,12 +98,13 @@ def generate(config_dict):
     if not has_frr_protocol_in_dict(config_dict, 'nhrp'):
         return None
 
-    if 'deleted' in config_dict['nhrp']:
-        return None
-    render(nhrp_nftables_conf, 'frr/nhrpd_nftables.conf.j2', config_dict['nhrp'])
+    nhrp = config_dict['nhrp']
+    # Without NHRP config the template only deletes its nft tables
+    if 'deleted' in nhrp:
+        nhrp = {}
 
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().generate(config_dict)
+    render(nhrp_nftables_conf, 'frr/nhrpd_nftables.conf.j2', nhrp)
+
     return None
 
 
@@ -115,8 +114,6 @@ def apply(config_dict):
     if nft_rc != 0:
         raise ConfigError('Failed to apply NHRP tunnel firewall rules')
 
-    if config_dict and not is_systemd_service_running('vyos-configd.service'):
-        FRRender().apply()
     return None
 
 

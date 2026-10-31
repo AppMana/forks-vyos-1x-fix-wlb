@@ -610,7 +610,8 @@ openvpn_translate = {
     'aes192gcm': 'aes-192-gcm',
     'aes192': 'aes-192-cbc',
     'aes256gcm': 'aes-256-gcm',
-    'aes256': 'aes-256-cbc'
+    'aes256': 'aes-256-cbc',
+    'chacha20poly1305': 'chacha20-poly1305',
 }
 
 @register_filter('openvpn_cipher')
@@ -913,12 +914,13 @@ def range_to_regex(num_range):
 @register_filter('kea_address_json')
 def kea_address_json(addresses):
     from json import dumps
-    from vyos.utils.network import is_addr_assigned
+    from vyos.utils.network import get_interfaces_by_ip
 
     out = []
 
     for address in addresses:
-        ifname = is_addr_assigned(address, return_ifname=True, include_vrf=True)
+        ifaces = get_interfaces_by_ip(address, include_vrf=True)
+        ifname = ifaces[0] if ifaces else None
 
         if not ifname:
             continue
@@ -980,6 +982,7 @@ def kea_high_availability_json(config):
 @register_filter('kea_client_class_json')
 def kea_client_class_json(client_classes):
     from vyos.kea import kea_build_client_class_test
+    from vyos.kea import kea_parse_options
     from json import dumps
     out = []
 
@@ -991,6 +994,15 @@ def kea_client_class_json(client_classes):
             'name': name,
             'test': kea_build_client_class_test(config)
         }
+
+        if 'option' in config:
+            client_class['option-data'] = kea_parse_options(config['option'])
+
+            if 'bootfile_name' in config['option']:
+                client_class['boot-file-name'] = config['option']['bootfile_name']
+
+            if 'bootfile_server' in config['option']:
+                client_class['next-server'] = config['option']['bootfile_server']
 
         out.append(client_class)
 

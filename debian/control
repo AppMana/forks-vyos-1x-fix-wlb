@@ -68,7 +68,6 @@ Depends:
   at,
   rsync,
   vyatta-bash,
-  vyatta-biosdevname,
   vyatta-cfg,
   vyos-http-api-tools,
 ## End of Fundamentals
@@ -171,7 +170,6 @@ Depends:
 # For "interfaces wwan"
   modemmanager,
   usb-modeswitch,
-  libqmi-utils,
 # End "interfaces wwan"
 # For "interfaces openvpn"
   openvpn (>= 2.7),
@@ -445,7 +443,6 @@ Depends:
   bgpq4,
   dnsdist,
   dnsutils,
-  exfat-fuse,
   exfatprogs,
   fancontrol,
   grepcidr,

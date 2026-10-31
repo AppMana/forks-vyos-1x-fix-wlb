@@ -33,7 +33,7 @@ from vyos.utils.process import is_systemd_service_running
 from vyos.utils.file import read_file
 from vyos.pki import create_certificate
 from vyos.pki import create_certificate_request
-from vyos.pki import create_private_key
+from vyos.pki import create_ec_private_key
 from vyos.pki import encode_certificate
 from vyos.pki import encode_private_key
 from vyos.utils.network import get_interface_config
@@ -44,6 +44,7 @@ from vyos.template import address_from_cidr
 from vyos.template import inc_ip
 from vyos.template import last_host_address
 from vyos.template import netmask_from_cidr
+from vyos.xml_ref import default_value
 
 PROCESS_NAME = 'openvpn'
 
@@ -78,6 +79,10 @@ interface = ''
 remote_host = ''
 vrf_name = 'orange'
 dummy_if = 'dum1301'
+# the MTU interfaces_openvpn.py picks when data channel offload is enabled
+dco_default_mtu = 1420
+# the one OpenVPN uses on its own
+default_mtu = int(default_value(base_path + ['vtun0', 'mtu']))
 
 def get_vrf(interface):
     for upper in glob(f'/sys/class/net/{interface}/upper*'):
@@ -99,7 +104,7 @@ def generate_pki():
         'organization': 'VyOS',
         'common_name': 'VyOS Test',
     }
-    key = create_private_key('ec', 256)
+    key = create_ec_private_key(256)
     request = create_certificate_request(subject, key)
     # is_ca gives it both CLIENT_AUTH and SERVER_AUTH, so one certificate
     # serves either end of a tunnel
@@ -240,6 +245,12 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
 
         self.assertDcoDataPath(interface, multipoint=False)
 
+        # the default is left to OpenVPN, which applies it - or whatever the
+        # server pushes - once connected, so only the rendered option can tell
+        self.assertIn(
+            f'tun-mtu {dco_default_mtu}', read_file(f'/run/openvpn/{interface}.conf')
+        )
+
     def test_openvpn_dco_peer_reaches_the_kernel(self):
         # VyOS creates the "ovpn" device itself whenever the daemon cannot -
         # a client whose server is not up yet never opens its tun, which is
@@ -317,6 +328,143 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
             f'{client} restarted {restarts} time(s) adopting its device\n'
             f'{self._openvpn_log(client)}',
         )
+
+    def test_openvpn_dco_chacha20poly1305(self):
+        # ChaCha20-Poly1305 is offloaded just like AES-GCM. A peer only shows
+        # up in the Kernel once its key got installed, so a client and a server
+        # offering nothing else prove the module took that very cipher.
+        server = 'vtun5110'
+        client = 'vtun5111'
+        port = '1196'
+
+        path = base_path + [server]
+        self.cli_set(path + ['mode', 'server'])
+        self.cli_set(path + ['local-port', port])
+        self.cli_set(path + ['server', 'subnet', '10.98.0.0/24'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'dh-params', 'ovpn_test'])
+        self.cli_set(path + ['encryption', 'data-ciphers', 'chacha20poly1305'])
+        self.cli_set(path + ['offload', 'dco'])
+        self.cli_commit()
+
+        config = read_file(f'/run/openvpn/{server}.conf')
+        self.assertIn('data-ciphers CHACHA20-POLY1305', config)
+        self.assertDcoDataPath(server)
+
+        path = base_path + [client]
+        self.cli_set(path + ['mode', 'client'])
+        self.cli_set(path + ['remote-host', '127.0.0.1'])
+        self.cli_set(path + ['remote-port', port])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['encryption', 'data-ciphers', 'chacha20poly1305'])
+        self.cli_set(path + ['offload', 'dco'])
+        self.cli_commit()
+
+        self.assertDcoDataPath(client, multipoint=False)
+        self.assertGreater(
+            self._peers(server),
+            0,
+            f'the Kernel holds no peer for {server}\n{self._openvpn_log(server)}',
+        )
+        self.assertGreater(
+            self._peers(client),
+            0,
+            f'the Kernel holds no peer for {client}\n{self._openvpn_log(client)}',
+        )
+
+        # and it is the cipher the two of them settled on
+        log = cmdl(
+            ['sudo', 'journalctl', '-u', f'openvpn@{client}.service', '-o', 'cat']
+        )
+        self.assertIn("Data Channel: cipher 'CHACHA20-POLY1305'", log)
+
+    def test_openvpn_site2site_dco_chacha20poly1305(self):
+        # the fallback cipher decides the offload in site-to-site mode
+        interface = 'vtun5000'
+        path = base_path + [interface]
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '10.0.0.1'])
+        self.cli_set(path + ['remote-address', '192.168.0.1'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'role', 'active'])
+        self.cli_set(path + ['encryption', 'data-ciphers-fallback', 'chacha20poly1305'])
+        self.cli_set(path + ['offload', 'dco'])
+        self.cli_commit()
+
+        config = read_file(f'/run/openvpn/{interface}.conf')
+        self.assertIn('data-ciphers-fallback CHACHA20-POLY1305', config)
+        self.assertDcoDataPath(interface, multipoint=False)
+
+    def test_openvpn_site2site_shared_secret_aead(self):
+        # OpenVPN's static key mode only does CBC and exits on an AEAD cipher,
+        # which in site-to-site mode can also come in as the fallback cipher
+        interface = 'vtun5000'
+        path = base_path + [interface]
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '10.0.0.1'])
+        self.cli_set(path + ['remote-address', '192.168.0.1'])
+        self.cli_set(path + ['shared-secret-key', 'ovpn_test'])
+
+        # check validate() - the static cipher is refused just the same
+        self.cli_set(path + ['encryption', 'cipher', 'aes256gcm'])
+        with self.assertRaisesRegex(ConfigSessionError, r'encryption\s+cipher'):
+            self.cli_commit()
+        self.cli_delete(path + ['encryption', 'cipher'])
+
+        # check validate() - every AEAD cipher the CLI offers
+        for cipher in ['aes128gcm', 'aes192gcm', 'aes256gcm', 'chacha20poly1305']:
+            self.cli_set(path + ['encryption', 'data-ciphers-fallback', cipher])
+            with self.assertRaisesRegex(
+                ConfigSessionError, r'encryption\s+data-ciphers-fallback'
+            ):
+                self.cli_commit()
+
+        # a CBC cipher is what static key mode runs with
+        self.cli_set(path + ['encryption', 'data-ciphers-fallback', 'aes256'])
+        self.cli_commit()
+
+        for _ in range(10):
+            if is_systemd_service_running(f'openvpn@{interface}.service'):
+                break
+            sleep(1)
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
+
+    def test_openvpn_site2site_generated_shared_secret(self):
+        # A key from "generate pki openvpn shared-secret install" must be stored
+        # without its BEGIN/END wrapper, as that is added again on commit
+        interface = 'vtun5000'
+        path = base_path + [interface]
+        key_name = 'ovpn_generated'
+        key_path = ['pki', 'openvpn', 'shared-secret', key_name]
+
+        # op-mode inherits the session environment and installs into it
+        out = self.op_mode(
+            ['generate', 'pki', 'openvpn', 'shared-secret', 'install', key_name]
+        )
+        self.assertNotIn('not in configure mode', out)
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '10.0.0.1'])
+        self.cli_set(path + ['remote-address', '192.168.0.1'])
+        self.cli_set(path + ['shared-secret-key', key_name])
+        self.cli_set(path + ['encryption', 'cipher', 'aes256'])
+        self.cli_commit()
+
+        key_file = read_file(f'/run/openvpn/{interface}_shared.key')
+        self.assertEqual(key_file.count('BEGIN OpenVPN Static key'), 1)
+
+        for _ in range(10):
+            if is_systemd_service_running(f'openvpn@{interface}.service'):
+                break
+            sleep(1)
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
+
+        self.cli_delete(key_path)
 
     # OVPN_CMD_PEER_GET carries GENL_ADMIN_PERM, hence the detour through
     # sudo. The probe swallows its own errors so a missing interface or a
@@ -626,6 +774,16 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
         self.assertTrue(process_named_running(PROCESS_NAME))
         self.assertIn(interface, interfaces())
 
+    def assertServiceRunning(self, interface):
+        # a commit restarts the daemon, so the unit needs a moment to reach
+        # "running" - asserting straight after the commit races it, which shows
+        # up as a failure on a cold boot and a pass on a warm one
+        for _ in range(10):
+            if is_systemd_service_running(f'openvpn@{interface}.service'):
+                return
+            sleep(1)
+        self.fail(f'openvpn@{interface}.service is not running')
+
     def assertDcoDataPath(self, interface, multipoint=True):
         # An "ovpn" device in the wrong operating mode is adopted by the daemon
         # just the same and then rejects every peer, and iproute2 cannot show
@@ -707,6 +865,250 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
         self.assertIsNone(get_ovpn_mode(interface))
         tmp = json.loads(cmdl(['ip', '-d', '-j', 'link', 'show', 'dev', interface]))
         self.assertEqual(tmp[0].get('linkinfo', {}).get('info_kind'), 'tun')
+
+    def assertMtu(self, interface, mtu):
+        # the daemon applies "tun-mtu" on its own once it brings the tunnel up
+        tmp = None
+        for _ in range(10):
+            # the interface can briefly be gone while the daemon restarts
+            tmp = (get_interface_config(interface) or {}).get('mtu')
+            if tmp == mtu:
+                break
+            sleep(1)
+        self.assertEqual(tmp, mtu)
+
+    def main_pid(self, interface):
+        return cmdl(
+            [
+                'systemctl',
+                'show',
+                '--property=MainPID',
+                '--value',
+                f'openvpn@{interface}.service',
+            ]
+        ).strip()
+
+    def assertRestarted(self, interface, old_pid):
+        # OpenVPN applies "tun-mtu" only when it brings the tunnel up, so the
+        # MTU on the link alone - which VyOS sets too - can not tell
+        pid = old_pid
+        for _ in range(10):
+            pid = self.main_pid(interface)
+            if pid not in (old_pid, '0'):
+                break
+            sleep(1)
+        self.assertNotIn(pid, (old_pid, '0'), f'openvpn@{interface} not restarted')
+
+    def test_openvpn_server_dco_mtu(self):
+        # The "ovpn" Kernel module does not clamp the MSS, so enabling the
+        # offload must lower the MTU unless one is configured explicitly
+        interface = 'vtun5000'
+        path = base_path + [interface]
+        config_file = f'/run/openvpn/{interface}.conf'
+
+        self.cli_set(path + ['mode', 'server'])
+        self.cli_set(path + ['local-port', '2000'])
+        self.cli_set(path + ['server', 'subnet', '192.0.2.0/24'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'dh-params', 'ovpn_test'])
+        self.cli_set(path + ['encryption', 'data-ciphers', 'aes256gcm'])
+        self.cli_commit()
+
+        # the userspace data path keeps OpenVPN's own default and its mssfix
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertMtu(interface, default_mtu)
+
+        self.cli_set(path + ['offload', 'dco'])
+        self.cli_commit()
+
+        self.assertIn(f'tun-mtu {dco_default_mtu}', read_file(config_file))
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, dco_default_mtu)
+
+        # an explicit MTU wins over the default, and takes a restart to apply
+        pid = self.main_pid(interface)
+        self.cli_set(path + ['mtu', '1380'])
+        self.cli_commit()
+
+        self.assertIn('tun-mtu 1380', read_file(config_file))
+        self.assertRestarted(interface, pid)
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, 1380)
+
+        # check validate() - one MTU only, a raw one would silently win
+        self.cli_set(path + ['openvpn-option', '--tun-mtu 1400'])
+        with self.assertRaisesRegex(ConfigSessionError, r'openvpn-option\s+tun-mtu'):
+            self.cli_commit()
+
+        # without the CLI one the raw option is honoured, no default added
+        self.cli_delete(path + ['mtu'])
+        self.cli_commit()
+
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, 1400)
+
+        # and once the raw option is gone, the default is back
+        self.cli_delete(path + ['openvpn-option'])
+        self.cli_commit()
+
+        self.assertIn(f'tun-mtu {dco_default_mtu}', read_file(config_file))
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, dco_default_mtu)
+
+        # an option merely named alike does not size the tunnel
+        self.cli_set(path + ['openvpn-option', '--tun-mtu-max 1600'])
+        self.cli_commit()
+
+        self.assertIn(f'tun-mtu {dco_default_mtu}', read_file(config_file))
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, dco_default_mtu)
+        self.cli_delete(path + ['openvpn-option'])
+
+        # OpenVPN refuses "tun-mtu" next to "link-mtu", so a raw "link-mtu"
+        # must keep the default out or the daemon would not start
+        self.cli_set(path + ['openvpn-option', '--link-mtu 1450'])
+        self.cli_commit()
+
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertDcoDataPath(interface)
+
+        # check validate() - the same goes for an explicit MTU
+        self.cli_set(path + ['mtu', '1380'])
+        with self.assertRaisesRegex(ConfigSessionError, r'openvpn-option\s+link-mtu'):
+            self.cli_commit()
+        self.cli_delete(path + ['mtu'])
+        self.cli_delete(path + ['openvpn-option'])
+        self.cli_commit()
+
+        self.assertIn(f'tun-mtu {dco_default_mtu}', read_file(config_file))
+        self.assertDcoDataPath(interface)
+        self.assertMtu(interface, dco_default_mtu)
+
+        # check validate() - IPv6 inside the tunnel needs its minimum MTU
+        self.cli_set(path + ['server', 'subnet', '2001:db8::/64'])
+        self.cli_set(path + ['mtu', '1200'])
+        with self.assertRaisesRegex(ConfigSessionError, r'minimum\s+MTU\s+is\s+"1280"'):
+            self.cli_commit()
+        self.cli_delete(path + ['server', 'subnet', '2001:db8::/64'])
+        self.cli_delete(path + ['mtu'])
+
+        # and without the offload the default goes away with it
+        self.cli_delete(path + ['offload'])
+        self.cli_commit()
+
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertMtu(interface, default_mtu)
+
+    def test_openvpn_server_mtu(self):
+        # Without the offload an MTU is only ever what the CLI asks for
+        interface = 'vtun5000'
+        path = base_path + [interface]
+        config_file = f'/run/openvpn/{interface}.conf'
+
+        self.cli_set(path + ['mode', 'server'])
+        self.cli_set(path + ['local-port', '2000'])
+        self.cli_set(path + ['server', 'subnet', '192.0.2.0/24'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'dh-params', 'ovpn_test'])
+        self.cli_set(path + ['mtu', '1380'])
+        self.cli_commit()
+
+        config = read_file(config_file)
+        self.assertIn('disable-dco', config)
+        self.assertIn('tun-mtu 1380', config)
+        self.assertMtu(interface, 1380)
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
+
+        # check validate() - OpenVPN refuses anything below its own minimum
+        self.cli_set(path + ['mtu', '99'])
+        with self.assertRaisesRegex(ConfigSessionError, r'at\s+least\s+100'):
+            self.cli_commit()
+        self.cli_set(path + ['mtu', '1380'])
+
+        # check validate() - one MTU only, whichever raw option sizes it
+        for option in ['--tun-mtu 1400', '--link-mtu 1450', '--udp-mtu 1450']:
+            keyword = option.split()[0].lstrip('-')
+            self.cli_set(path + ['openvpn-option', option])
+            with self.assertRaisesRegex(
+                ConfigSessionError, rf'openvpn-option\s+{keyword}'
+            ):
+                self.cli_commit()
+            self.cli_delete(path + ['openvpn-option'])
+
+        # dropping the MTU restarts the daemon, which then falls back to its
+        # own default
+        pid = self.main_pid(interface)
+        self.cli_delete(path + ['mtu'])
+        self.cli_commit()
+
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertRestarted(interface, pid)
+        self.assertMtu(interface, default_mtu)
+        # a new PID alone would also come from a daemon stuck restarting
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
+
+        # the XML default is no configured MTU, so a raw option sizing the
+        # tunnel neither conflicts with it nor is overridden by it
+        self.cli_set(path + ['openvpn-option', '--tun-mtu 1400'])
+        self.cli_commit()
+
+        self.assertNotIn('tun-mtu', read_file(config_file))
+        self.assertMtu(interface, 1400)
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
+
+    def test_openvpn_site2site_dco_mtu(self):
+        # the default applies to the point-to-point data path just the same
+        interface = 'vtun5000'
+        path = base_path + [interface]
+        config_file = f'/run/openvpn/{interface}.conf'
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '10.0.0.1'])
+        self.cli_set(path + ['remote-address', '192.168.0.1'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'role', 'active'])
+        self.cli_set(path + ['encryption', 'data-ciphers-fallback', 'aes256gcm'])
+        self.cli_set(path + ['offload', 'dco'])
+        self.cli_commit()
+
+        self.assertIn(f'tun-mtu {dco_default_mtu}', read_file(config_file))
+        self.assertDcoDataPath(interface, multipoint=False)
+        self.assertMtu(interface, dco_default_mtu)
+
+        self.cli_set(path + ['mtu', '1380'])
+        self.cli_commit()
+
+        self.assertIn('tun-mtu 1380', read_file(config_file))
+        self.assertDcoDataPath(interface, multipoint=False)
+        self.assertMtu(interface, 1380)
+
+    def test_openvpn_site2site_mtu_ipv6(self):
+        # IPv6 inside a site-to-site tunnel comes from its local-address
+        interface = 'vtun5000'
+        path = base_path + [interface]
+        config_file = f'/run/openvpn/{interface}.conf'
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '2001:db8:1::1'])
+        self.cli_set(path + ['remote-address', '2001:db8:ffff::1'])
+        self.cli_set(path + ['shared-secret-key', 'ovpn_test'])
+        self.cli_set(path + ['encryption', 'cipher', 'aes256'])
+        self.cli_set(path + ['mtu', '1279'])
+
+        # check validate() - IPv6 needs its minimum link MTU
+        with self.assertRaisesRegex(ConfigSessionError, r'minimum\s+MTU\s+is\s+"1280"'):
+            self.cli_commit()
+
+        self.cli_set(path + ['mtu', '1280'])
+        self.cli_commit()
+
+        self.assertIn('tun-mtu 1280', read_file(config_file))
+        self.assertMtu(interface, 1280)
+        self.assertTrue(is_systemd_service_running(f'openvpn@{interface}.service'))
 
     def test_openvpn_server_dco_verify(self):
         # Configurations the "ovpn" Kernel module can not serve must be
@@ -927,6 +1329,50 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
         for ii in num_range:
             interface = f'vtun{ii}'
             self.assertNotIn(interface, interfaces())
+
+    def test_openvpn_missing_shared_secret_references(self):
+        interface = 'vtun5099'
+        path = base_path + [interface]
+        missing_key = 'NONEXISTENT'
+        pki_key_path = ['pki', 'openvpn', 'shared-secret', 'ovpn_test']
+
+        self.cli_delete(pki_key_path)
+
+        self.cli_set(path + ['mode', 'server'])
+        self.cli_set(path + ['server', 'subnet', '10.20.30.0/24'])
+        self.cli_set(path + ['tls', 'ca-certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'certificate', 'ovpn_test'])
+        self.cli_set(path + ['tls', 'dh-params', 'ovpn_test'])
+
+        self.cli_set(path + ['tls', 'auth-key', missing_key])
+        with self.assertRaisesRegex(
+            ConfigSessionError,
+            rf'Invalid "tls auth-key" value "{missing_key}" on OpenVPN interface\s+{interface}',
+        ):
+            self.cli_commit()
+
+        self.cli_delete(path + ['tls', 'auth-key'])
+        self.cli_set(path + ['tls', 'crypt-key', missing_key])
+        with self.assertRaisesRegex(
+            ConfigSessionError,
+            rf'Invalid "tls crypt-key" value "{missing_key}" on OpenVPN interface\s+{interface}',
+        ):
+            self.cli_commit()
+
+        self.cli_delete(path + ['tls'])
+        self.cli_delete(path + ['server'])
+        self.cli_set(path + ['mode', 'site-to-site'])
+        self.cli_set(path + ['local-address', '10.0.0.1'])
+        self.cli_set(path + ['remote-address', '10.0.0.2'])
+        self.cli_set(path + ['encryption', 'cipher', 'aes256'])
+        self.cli_set(path + ['shared-secret-key', missing_key])
+        with self.assertRaisesRegex(
+            ConfigSessionError,
+            rf'Invalid "shared-secret-key" value "{missing_key}" on OpenVPN interface\s+{interface}',
+        ):
+            self.cli_commit()
+
+        self.cli_set(pki_key_path + ['key'], ovpn_key_data.replace('\n', ''))
 
     def test_openvpn_server_ip_version(self):
         # Test the server mode behavior combined with each IP protocol version
@@ -1297,6 +1743,74 @@ class TestInterfacesOpenVPN(VyOSUnitTestSHIM.TestCase):
         self.cli_set(path + ['ip-version', 'dual-stack'])
         with self.assertRaises(ConfigSessionError):
             self.cli_commit()
+
+        self.cli_delete(base_path)
+        self.cli_commit()
+
+    def test_openvpn_site2site_keepalive_off(self):
+        # site-to-site renders the keepalive as "ping"/"ping-restart" rather
+        # than the "keepalive" helper, so a zero interval has to leave both
+        # out: "ping 0" arms nothing while the "ping-restart" left behind
+        # keeps tearing an idle tunnel down
+        interface = 'vtun5002'
+        path = base_path + [interface]
+
+        self.cli_set(path + ['mode', 'site-to-site'])
+        # not the dummy interface address setUpClass configures, which
+        # OpenVPN would be assigning to the tunnel a second time
+        self.cli_set(path + ['local-address', '10.0.20.1'])
+        self.cli_set(path + ['remote-address', '10.0.20.2'])
+        self.cli_set(path + ['shared-secret-key', 'ovpn_test'])
+        self.cli_set(path + ['encryption', 'cipher', 'aes256'])
+        self.cli_set(path + ['keep-alive', 'interval', '0'])
+        self.cli_commit()
+
+        # match on the directive, not on the text: "ping" is too short to
+        # look for anywhere in the file
+        config = read_file(f'/run/openvpn/{interface}.conf')
+        directives = [line.split()[0] for line in config.splitlines() if line.strip()]
+        self.assertNotIn('ping', directives)
+        self.assertNotIn('ping-restart', directives)
+        self.assertServiceRunning(interface)
+
+        # an enabled keepalive renders both, and the timeout is the interval
+        # times the number of failures it tolerates
+        self.cli_set(path + ['keep-alive', 'interval', '10'])
+        self.cli_set(path + ['keep-alive', 'failure-count', '60'])
+        self.cli_commit()
+
+        # exact lines, not a substring of the file: "ping 10" would otherwise
+        # be satisfied by a rendered "ping 100"
+        config = read_file(f'/run/openvpn/{interface}.conf')
+        lines = config.splitlines()
+        self.assertIn('ping 10', lines)
+        self.assertIn('ping-restart 600', lines)
+        self.assertServiceRunning(interface)
+
+        # check validate() - OpenVPN caps ping-restart at 24 hours, and
+        # nothing doubles the value here the way it does for the server
+        self.cli_set(path + ['keep-alive', 'interval', '600'])
+        self.cli_set(path + ['keep-alive', 'failure-count', '145'])
+        with self.assertRaisesRegex(ConfigSessionError, r'cannot\s+exceed\s+86400'):
+            self.cli_commit()
+
+        # 600 * 144 is exactly 24 hours, which OpenVPN still accepts
+        self.cli_set(path + ['keep-alive', 'failure-count', '144'])
+        self.cli_commit()
+
+        config = read_file(f'/run/openvpn/{interface}.conf')
+        self.assertIn('ping-restart 86400', config.splitlines())
+        self.assertServiceRunning(interface)
+
+        # a failure-count below 2 is deliberately allowed here, unlike the
+        # server: it renders "ping-restart 10", a working "restart after one
+        # missed ping"
+        self.cli_set(path + ['keep-alive', 'interval', '10'])
+        self.cli_set(path + ['keep-alive', 'failure-count', '1'])
+        self.cli_commit()
+
+        config = read_file(f'/run/openvpn/{interface}.conf')
+        self.assertIn('ping-restart 10', config.splitlines())
 
         self.cli_delete(base_path)
         self.cli_commit()

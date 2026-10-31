@@ -227,17 +227,25 @@ load_bootfile ()
     return 0
 }
 
-# restore if missing pre-config script
-restore_if_missing_preconfig_script ()
+# restore a bootup script from the image if the config volume has none
+restore_if_missing_bootup_script ()
 {
-    if [ ! -x ${vyatta_sysconfdir}/config/scripts/vyos-preconfig-bootup.script ]; then
-        mkdir -p ${vyatta_sysconfdir}/config/scripts
-        chgrp ${GROUP} ${vyatta_sysconfdir}/config/scripts
-        chmod 775 ${vyatta_sysconfdir}/config/scripts
-        cp ${vyos_rootfs_dir}/opt/vyatta/etc/config/scripts/vyos-preconfig-bootup.script ${vyatta_sysconfdir}/config/scripts/
-        chgrp ${GROUP} ${vyatta_sysconfdir}/config/scripts/vyos-preconfig-bootup.script
-        chmod 750 ${vyatta_sysconfdir}/config/scripts/vyos-preconfig-bootup.script
+    local script=vyos-${1}config-bootup.script
+    local dir=${vyatta_sysconfdir}/config/scripts
+
+    [ -x "${dir}/${script}" ] && return 0
+
+    mkdir -p "${dir}"
+    chgrp ${GROUP} "${dir}"
+    chmod 775 "${dir}"
+    # quoted, so a rootfs path that is empty or not a single word fails here
+    # instead of copying whatever the words happen to name
+    if ! cp "${vyos_rootfs_dir}/opt/vyatta/etc/config/scripts/${script}" "${dir}/"; then
+        log_failure_msg "could not restore ${script}"
+        return 1
     fi
+    chgrp ${GROUP} "${dir}/${script}"
+    chmod 750 "${dir}/${script}"
 }
 
 # execute the pre-config script
@@ -245,19 +253,6 @@ run_preconfig_script ()
 {
     if [ -x $vyatta_sysconfdir/config/scripts/vyos-preconfig-bootup.script ]; then
         $vyatta_sysconfdir/config/scripts/vyos-preconfig-bootup.script
-    fi
-}
-
-# restore if missing post-config script
-restore_if_missing_postconfig_script ()
-{
-    if [ ! -x ${vyatta_sysconfdir}/config/scripts/vyos-postconfig-bootup.script ]; then
-        mkdir -p ${vyatta_sysconfdir}/config/scripts
-        chgrp ${GROUP} ${vyatta_sysconfdir}/config/scripts
-        chmod 775 ${vyatta_sysconfdir}/config/scripts
-        cp ${vyos_rootfs_dir}/opt/vyatta/etc/config/scripts/vyos-postconfig-bootup.script ${vyatta_sysconfdir}/config/scripts/
-        chgrp ${GROUP} ${vyatta_sysconfdir}/config/scripts/vyos-postconfig-bootup.script
-        chmod 750 ${vyatta_sysconfdir}/config/scripts/vyos-postconfig-bootup.script
     fi
 }
 
@@ -362,7 +357,9 @@ clear_or_override_config_files ()
 
 update_interface_config ()
 {
-    if [ -d /run/udev/vyos ]; then
+    # add a configuration node for any interface the name store knows about
+    # that does not have one yet
+    if [ -f /opt/vyatta/etc/config/interface-mapping.json ]; then
         $vyos_libexec_dir/vyos-interface-rescan.py $BOOTFILE
     fi
 }
@@ -374,17 +371,29 @@ warn_missing_interface_hardware ()
     local status_file="/run/vyos-net-name-resolve.json"
     [ -f "${status_file}" ] || return 0
 
-    jq -r '.missing // {} | to_entries[] | "\(.value) \(.key)"' "${status_file}" \
+    jq -r '.missing // {} | to_entries[] | "\(.key) \(.value)"' "${status_file}" \
         2>/dev/null | while read -r intf hwid; do
         [ -n "${intf}" ] || continue
-        log_failure_msg "hw-id ${hwid} configured as '${intf}' was not found during boot - check cabling, hardware and driver/firmware"
+        log_failure_msg "interface '${intf}' (${hwid}) did not appear during boot - check cabling, hardware and driver/firmware. Its name stays reserved."
     done
 
-    jq -r '.pending_unresolved // [] | .[]' "${status_file}" 2>/dev/null | \
-        while read -r intf; do
+    # A replacement NIC inheriting a slot's name also inherits that
+    # interface's addresses, so say so rather than doing it silently.
+    jq -r '.matched_by_path // {} | to_entries[] | "\(.key) \(.value)"' "${status_file}" \
+        2>/dev/null | while read -r intf hwid; do
         [ -n "${intf}" ] || continue
-        log_failure_msg "interface '${intf}' still has no hw-id configured after this boot's naming pass - bind it manually, e.g. 'set interfaces ethernet ${intf} hw-id <mac>', or remove the node if it is no longer needed"
+        log_warning_msg "interface '${intf}' was matched to new hardware ${hwid} by slot - verify it is the port you expect before relying on its configuration"
     done
+
+    jq -r '.adopted // {} | to_entries[] | "\(.key) \(.value)"' "${status_file}" \
+        2>/dev/null | while read -r intf hwid; do
+        [ -n "${intf}" ] || continue
+        log_warning_msg "interface '${intf}' had no NIC this boot and was given to the new Hyper-V NIC ${hwid} - verify it is the port you expect before relying on its configuration"
+    done
+
+    if [ "$(jq -r '.persisted // true' "${status_file}" 2>/dev/null)" = "false" ]; then
+        log_failure_msg "interface names could not be persisted - the configuration volume is not mounted"
+    fi
 }
 
 cleanup_post_commit_hooks () {
@@ -637,7 +646,7 @@ start ()
     # resolved against it before anything below applies interface config.
     systemctl start vyos-net-name-resolve.service || overall_status=1
 
-    restore_if_missing_preconfig_script
+    restore_if_missing_bootup_script pre
 
     run_preconfig_script
 
@@ -707,7 +716,7 @@ start ()
     telinit q
     chmod g-w,o-w /
 
-    restore_if_missing_postconfig_script
+    restore_if_missing_bootup_script post
 
     run_postconfig_scripts
     tmp=$(${vyos_libexec_dir}/read-saved-value.py --path "protocols rpki cache")

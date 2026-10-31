@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - rolling
+      - scutum
       - circinus
       - sagitta
     paths:
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches:
       - rolling
+      - scutum
       - circinus
       - sagitta
     paths:
@@ -45,6 +47,7 @@ jobs:
       test_tpm_tests: ${{ steps.config.outputs.test_tpm_tests }}
       test_vpp: ${{ steps.config.outputs.test_vpp }}
       test_vpp_runner: ${{ steps.config.outputs.test_vpp_runner }}
+      test_ifname: ${{ steps.config.outputs.test_ifname }}
       install_build_deps: ${{ steps.config.outputs.install_build_deps }}
       mirror_enabled: ${{ steps.config.outputs.mirror_enabled }}
       vyos_build_ref: ${{ steps.determine-ref.outputs.vyos_build_ref }}
@@ -79,6 +82,7 @@ jobs:
           echo "test_tpm_tests=$(echo $CONFIG | jq -r .test_tpm_tests)" >> $GITHUB_OUTPUT
           echo "test_vpp=$(echo $CONFIG | jq -r .test_vpp)" >> $GITHUB_OUTPUT
           echo "test_vpp_runner=$(echo $CONFIG | jq -c .test_vpp_runner)" >> $GITHUB_OUTPUT
+          echo "test_ifname=$(echo $CONFIG | jq -r .test_ifname)" >> $GITHUB_OUTPUT
           echo "install_build_deps=$(echo $CONFIG | jq -r .install_build_deps)" >> $GITHUB_OUTPUT
           echo "mirror_enabled=$(echo $CONFIG | jq -r .mirror_enabled)" >> $GITHUB_OUTPUT
 
@@ -169,8 +173,15 @@ jobs:
 
       - name: Generate ISO version string
         id: version
+        shell: bash
+        env:
+          BUILD_VERSION_FORMAT: ${{ needs.set_config.outputs.build_version_format }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "build_version=$(date -u +'${{ needs.set_config.outputs.build_version_format }}')" >> $GITHUB_OUTPUT
+          if [[ -n "$PR_NUMBER" ]]; then
+            BUILD_VERSION_FORMAT="${BUILD_VERSION_FORMAT//integration/GitHub-PR${PR_NUMBER}}"
+          fi
+          echo "build_version=$(date -u +"$BUILD_VERSION_FORMAT")" >> $GITHUB_OUTPUT
 
       - name: Build custom ISO image
         shell: bash
@@ -191,7 +202,7 @@ jobs:
           retention-days: 2
           name: vyos-${{ steps.version.outputs.build_version }}
           path: |
-            build/live-image-amd64.hybrid.iso
+            build/vyos-*-amd64.iso
             build/manifest.json
 
       - uses: atos-actions/clean-self-hosted-runner@v1.4.10
@@ -219,11 +230,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS CLI smoketests (no interfaces)
         id: test
         shell: bash
         run: |
-          if sudo make ${{ needs.set_config.outputs.test_cli_command }}; then
+          if sudo make ISO_PATH="$iso_path" ${{ needs.set_config.outputs.test_cli_command }}; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -253,11 +268,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS CLI smoketests VPP
         id: test
         shell: bash
         run: |
-          if sudo make test-vpp; then
+          if sudo make ISO_PATH="$iso_path" test-vpp; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -286,11 +305,83 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS CLI smoketests (interfaces only)
         id: test
         shell: bash
         run: |
-          if sudo make test-interfaces; then
+          if sudo make ISO_PATH="$iso_path" test-interfaces; then
+            echo "exit_code=success" >> $GITHUB_OUTPUT
+          else
+            echo "exit_code=fail" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  test_interface_naming:
+    needs: [build_iso, set_config]
+    if: needs.set_config.outputs.test_ifname == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ${{ needs.set_config.outputs.container_image }}
+      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged
+    outputs:
+      exit_code: ${{ steps.test.outputs.exit_code }}
+    steps:
+      - name: Clone vyos-build source code
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.set_config.outputs.vyos_build_repo }}
+          token: ${{ needs.set_config.outputs.use_pat == 'true' && secrets.PAT || secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.set_config.outputs.vyos_build_ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vyos-${{ needs.build_iso.outputs.build_version }}
+          path: build
+
+      - name: VyOS interface naming tests
+        id: test
+        shell: bash
+        run: |
+          if sudo make test-interface-naming; then
+            echo "exit_code=success" >> $GITHUB_OUTPUT
+          else
+            echo "exit_code=fail" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+  test_interface_naming_vmware:
+    needs: [build_iso, set_config]
+    if: needs.set_config.outputs.test_ifname == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    container:
+      image: ${{ needs.set_config.outputs.container_image }}
+      options: --sysctl net.ipv6.conf.lo.disable_ipv6=0 --privileged
+    outputs:
+      exit_code: ${{ steps.test.outputs.exit_code }}
+    steps:
+      - name: Clone vyos-build source code
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.set_config.outputs.vyos_build_repo }}
+          token: ${{ needs.set_config.outputs.use_pat == 'true' && secrets.PAT || secrets.GITHUB_TOKEN }}
+          ref: ${{ needs.set_config.outputs.vyos_build_ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vyos-${{ needs.build_iso.outputs.build_version }}
+          path: build
+
+      - name: VyOS interface naming tests (VMware firmware)
+        id: test
+        shell: bash
+        run: |
+          if sudo make test-interface-naming-vmware; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -319,11 +410,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS config load tests
         id: test
         shell: bash
         run: |
-          if sudo make testc; then
+          if sudo make ISO_PATH="$iso_path" testc; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -353,11 +448,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS config load tests VPP
         id: test
         shell: bash
         run: |
-          if sudo make testcvpp; then
+          if sudo make ISO_PATH="$iso_path" testcvpp; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -386,11 +485,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS RAID1 installation tests
         id: test
         shell: bash
         run: |
-          if sudo make testraid; then
+          if sudo make ISO_PATH="$iso_path" testraid; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -420,11 +523,15 @@ jobs:
           name: vyos-${{ needs.build_iso.outputs.build_version }}
           path: build
 
+      - name: Locate ISO image
+        shell: bash
+        run: echo "iso_path=$(ls build/vyos-*-amd64.iso | head -n1)" >> $GITHUB_ENV
+
       - name: VyOS TPM encryption tests
         id: test
         shell: bash
         run: |
-          if sudo make testtpm; then
+          if sudo make ISO_PATH="$iso_path" testtpm; then
             echo "exit_code=success" >> $GITHUB_OUTPUT
           else
             echo "exit_code=fail" >> $GITHUB_OUTPUT
@@ -437,6 +544,8 @@ jobs:
       - test_smoketest_cli
       - test_smoketest_cli_vpp
       - test_interfaces_cli
+      - test_interface_naming
+      - test_interface_naming_vmware
       - test_config_load
       - test_config_load_vpp
       - test_raid1_install
@@ -452,7 +561,7 @@ jobs:
           echo "${{ github.event.pull_request.number }}" > pr-report/pr_number.txt
 
           cat > pr-report/message.md << 'EOF'
-          CI integration ${{ (needs.test_smoketest_cli.outputs.exit_code == 'success' && needs.test_interfaces_cli.outputs.exit_code == 'success' && needs.test_config_load.outputs.exit_code == 'success' && needs.test_raid1_install.outputs.exit_code == 'success' && (needs.test_smoketest_cli_vpp.outputs.exit_code != 'fail') && (needs.test_config_load_vpp.outputs.exit_code != 'fail') && (needs.test_encrypted_config_tpm.outputs.exit_code != 'fail')) && '👍 passed!' || '❌ failed!' }}
+          CI integration ${{ (needs.test_smoketest_cli.outputs.exit_code == 'success' && needs.test_interfaces_cli.outputs.exit_code == 'success' && needs.test_config_load.outputs.exit_code == 'success' && needs.test_raid1_install.outputs.exit_code == 'success' && (needs.test_smoketest_cli_vpp.outputs.exit_code != 'fail') && (needs.test_config_load_vpp.outputs.exit_code != 'fail') && (needs.test_encrypted_config_tpm.outputs.exit_code != 'fail') && (needs.test_interface_naming.outputs.exit_code != 'fail') && (needs.test_interface_naming_vmware.outputs.exit_code != 'fail')) && '👍 passed!' || '❌ failed!' }}
 
           ### Details
 
@@ -465,6 +574,8 @@ jobs:
           * CLI Smoketests VPP ${{ needs.test_smoketest_cli_vpp.outputs.exit_code == 'success' && '👍 passed' || needs.test_smoketest_cli_vpp.outputs.exit_code == 'fail' && '❌ failed' || '⏭️ skipped' }}
           * Config tests VPP ${{ needs.test_config_load_vpp.outputs.exit_code == 'success' && '👍 passed' || needs.test_config_load_vpp.outputs.exit_code == 'fail' && '❌ failed' || '⏭️ skipped' }}
           * TPM tests ${{ needs.test_encrypted_config_tpm.outputs.exit_code == 'success' && '👍 passed' || needs.test_encrypted_config_tpm.outputs.exit_code == 'fail' && '❌ failed' || '⏭️ skipped' }}
+          * Interface naming tests ${{ needs.test_interface_naming.outputs.exit_code == 'success' && '👍 passed' || needs.test_interface_naming.outputs.exit_code == 'fail' && '❌ failed' || '⏭️ skipped' }}
+          * Interface naming tests (VMware) ${{ needs.test_interface_naming_vmware.outputs.exit_code == 'success' && '👍 passed' || needs.test_interface_naming_vmware.outputs.exit_code == 'fail' && '❌ failed' || '⏭️ skipped' }}
           EOF
 
       - uses: actions/upload-artifact@v7

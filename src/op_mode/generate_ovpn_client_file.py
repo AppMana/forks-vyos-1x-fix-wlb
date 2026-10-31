@@ -47,7 +47,8 @@ verb 3
     'aes192gcm': 'AES-192-GCM',
     'aes192': 'AES-192-CBC',
     'aes256gcm': 'AES-256-GCM',
-    'aes256': 'AES-256-CBC'
+    'aes256': 'AES-256-CBC',
+    'chacha20poly1305': 'CHACHA20-POLY1305'
 } %}
 
 {% if encryption is defined and encryption is not none %}
@@ -134,7 +135,7 @@ if __name__ == '__main__':
     if not config.exists(['pki', 'certificate', cert, 'certificate']):
         exit(f'OpenVPN certificate "{cert}" does not exist!')
 
-    if not config.exists(['pki', 'certificate', cert, 'private', 'key']):
+    if not config.exists(['pki', 'certificate', key, 'private', 'key']):
         exit(f'OpenVPN certificate key "{key}" does not exist!')
 
     config = config.get_config_dict(

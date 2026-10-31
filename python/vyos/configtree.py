@@ -97,6 +97,8 @@ _PROTOTYPES = {
     'get_nodes_of_kind': ([c_void_p, c_char_p, c_char_p], c_char_p),
     'get_rdeps_of_kind': ([c_void_p, c_char_p, c_char_p], c_char_p),
     'get_rdeps_of_kind_data': ([c_void_p, c_char_p, c_char_p], c_char_p),
+    'reference_path_from_config_path': ([c_void_p, c_char_p], c_char_p),
+    'reference_path_from_partial_path': ([c_void_p, c_char_p], c_char_p),
 }
 
 
@@ -829,12 +831,17 @@ def subtree_values_of_path(
     return list(map(tuple, lst))
 
 
-def reference_tree_to_json(from_dir, to_file, internal_cache='', libpath=LIBPATH):
+def reference_tree_to_json(
+    from_dir, to_file, internal_cache='', exclude_paths='[]', libpath=LIBPATH
+):
     # pylint: disable=raise-missing-from
     try:
         lib = get_lib(libpath)
         res = lib.reference_tree_to_json(
-            internal_cache.encode(), from_dir.encode(), to_file.encode()
+            internal_cache.encode(),
+            exclude_paths.encode(),
+            from_dir.encode(),
+            to_file.encode(),
         )
     except Exception as e:
         raise ConfigTreeError(e)
@@ -900,6 +907,9 @@ def validate_tree_filter(
         raise ConfigTreeError(e)
 
     msg = lib.get_error().decode()
+    if not res:
+        raise ConfigTreeError(msg)
+
     tree = ConfigTree(address=res)
 
     return tree, msg

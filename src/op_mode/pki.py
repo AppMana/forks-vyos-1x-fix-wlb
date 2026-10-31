@@ -41,6 +41,7 @@ from vyos.pki import create_certificate
 from vyos.pki import create_certificate_request
 from vyos.pki import create_certificate_revocation_list
 from vyos.pki import create_private_key
+from vyos.pki import create_ec_private_key
 from vyos.pki import create_dh_parameters
 from vyos.pki import load_certificate
 from vyos.pki import load_certificate_request
@@ -465,6 +466,12 @@ def generate_private_key():
         numeric_only=True,
         valid_responses=size_valid,
     )
+
+    # An elliptic curve key is picked by curve, not by modulus size, so it gets
+    # its own constructor - that keeps the number below out of the function that
+    # also builds RSA and DSA keys
+    if key_type == 'ec':
+        return create_ec_private_key(size), key_type
 
     return create_private_key(key_type, size), key_type
 
@@ -932,9 +939,10 @@ def generate_keypair(name, install=False, file=False):
 
 def generate_openvpn_key(name, install=False, file=False):
     raw_result = cmdl(['openvpn', '--genkey', 'secret', '/dev/stdout'])
-    # equivalent to the old `grep -o "^[^#]*"`, applied per line: keep
-    # everything before the first '#' on each line (comment lines become empty)
-    result = '\n'.join(line.split('#', 1)[0] for line in raw_result.splitlines())
+    # equivalent to the old `grep -o "^[^#]*"`: keep everything before the first
+    # '#' on each line and drop lines left empty (grep -o prints nothing for them)
+    stripped = (line.split('#', 1)[0] for line in raw_result.splitlines())
+    result = '\n'.join(line for line in stripped if line)
 
     if not result:
         print('Failed to generate OpenVPN key')

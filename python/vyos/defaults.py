@@ -32,7 +32,6 @@ directories = {
   'api_schema': f'{base_dir}/services/api/graphql/graphql/schema/',
   'api_client_op': f'{base_dir}/services/api/graphql/graphql/client_op/',
   'api_templates': f'{base_dir}/services/api/graphql/session/templates/',
-  'vyos_udev_dir' : '/run/udev/vyos',
   'isc_dhclient_dir' : '/run/dhclient',
   'dhcp6_client_dir' : '/run/dhcp6c',
   'vyos_configdir' : '/opt/vyatta/config',
@@ -63,10 +62,13 @@ config_files = {
 
 config_status = '/tmp/vyos-config-status'
 api_config_state = '/run/http-api-state'
+api_ready_state = '/run/http-api-ready'
 frr_debug_enable = '/tmp/vyos.frr.debug'
 dhclient_debug_enable = '/tmp/vyos.dhclient.debug'
 static_route_dhcp_interfaces_path = '/tmp/static_dhcp_interfaces'
 vyos_configd_socket_path = 'ipc:///run/vyos-configd.sock'
+podman_mount_program = '/usr/bin/fuse-overlayfs'
+vyos_domain_resolver_condition_path = '/run/use-vyos-domain-resolver'
 
 cfg_group = 'vyattacfg'
 
@@ -87,6 +89,15 @@ rt_symbolic_names = {
 
 rt_global_vrf = rt_symbolic_names['main']
 rt_global_table = rt_symbolic_names['main']
+
+# Firewall marks fragments with bit 31 of the packet mark until the filter
+# hooks are done. Firewall and routing policy marks stop at 2147483647, so the
+# bit is free - anything matching a mark while the bit can be set must mask it.
+fragment_mark_bit = '0x80000000'
+user_mark_mask = '0x7fffffff'
+
+# Loads nft rules with an hour match again whenever the UTC offset changes
+nft_time_refresh = f'{base_dir}/vyos-nft-time-refresh.py'
 
 vyconfd_conf = '/etc/vyos/vyconfd.conf'
 
