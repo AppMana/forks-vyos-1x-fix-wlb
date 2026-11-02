@@ -86,6 +86,18 @@ class TestWanLoadBalanceTemplate(TestCase):
         ])
 
 
+    def test_local_traffic_marks_reroute(self):
+        # A locally generated packet is routed before the output hook runs.
+        # Only a route chain makes the kernel route it again after its mark
+        # changes; in a filter chain the mark is set but the packet keeps
+        # the route it had, so the router's own traffic never fails over.
+        text = render_wlb(self.weighted)
+        outputs = [l.strip() for l in text.splitlines() if 'hook output' in l]
+        self.assertEqual(len(outputs), 2)  # ip, ip6
+        for line in outputs:
+            self.assertTrue(line.startswith('type route hook output'), line)
+
+
 class TestWanLoadBalanceNftRule(TestCase):
     def test_ipv4_address_range_is_rendered(self):
         # The CLI accepts ipv4range and !ipv4range for source/destination

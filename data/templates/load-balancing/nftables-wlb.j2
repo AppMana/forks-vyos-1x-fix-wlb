@@ -43,7 +43,8 @@ table ip vyos_wanloadbalance {
     }
 
     chain wlb_mangle_output {
-        type filter hook output priority -150; policy accept;
+{# a route chain routes the packet again when the mark changes #}
+        type route hook output priority -150; policy accept;
 {% if enable_local_traffic is vyos_defined %}
         meta mark != 0x0 counter return
         meta l4proto icmp counter return
@@ -97,7 +98,8 @@ table ip6 vyos_wanloadbalance {
     }
 
     chain wlb_mangle_output {
-        type filter hook output priority -150; policy accept;
+{# a route chain routes the packet again when the mark changes #}
+        type route hook output priority -150; policy accept;
 {% if enable_local_traffic is vyos_defined %}
         meta mark != 0x0 counter return
         meta l4proto ipv6-icmp counter return
